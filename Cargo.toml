@@ -5,4 +5,13 @@ authors = ["Zack Angelo <zackangelo@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-magick_rust = "0.11.0"
+# magick_rust = "0.11.0"
+env_logger = "0.6.1"
+log = "*"
+imageproc = "0.18.0"
+image = "*"
+rusttype = "0.7.6"
+conv = "*"
+hyper = "0.12"
+url = "1.7.2"
+gif = "0.10.2"
