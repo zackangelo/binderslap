@@ -10,8 +10,6 @@ use std::fs::File;
 
 use image::gif::Decoder;
 use gif::{ Encoder, Repeat };
-// use image::gif::gif::Repeat;
-// use image::gif::gif::Encoder; 
 
 use image::*;
 use imageproc::pixelops::weighted_sum;
@@ -26,11 +24,16 @@ use hyper::{Body, Request, Response, Server};
 use hyper::rt::Future;
 use hyper::service::service_fn_ok;
 
+const FONT_SCALE: Scale = Scale { x: 18.0, y: 18.0 }; 
+const CAPTION_PADDING_HORIZ: u32 = 16;
+const CAPTION_PADDING_BOTTOM: u32 = 20;
+
 pub fn draw_text_centered_mut<'a, I>(
     image: &'a mut I,
     color: I::Pixel,
     font: &'a Font<'a>,
     text: &'a str,
+    y: u32,
 ) where
     I: GenericImage,
     <I::Pixel as Pixel>::Subpixel: ValueInto<f32> + Clamp<f32>,
@@ -62,9 +65,6 @@ pub fn draw_text_centered_mut<'a, I>(
     // centered x pos
     let x = (image_width / 2) - (str_width_px / 2);
 
-    // hard-coded y pos
-    let y = 192;
-
     for g in glyphs {
         if let Some(bb) = g.pixel_bounding_box() {
             g.draw(|gx, gy, gv| {
@@ -84,16 +84,93 @@ pub fn draw_text_centered_mut<'a, I>(
     }
 }
 
-fn load_binderslap_gif() -> Vec<Frame> { 
-    println!("opening file"); 
-    let file_in = File::open("binderslap.gif").unwrap();
+fn split_into_lines(caption: &str, font: &Font, font_size: Scale, max_line_px: f32)-> Vec<String> { 
+    let words = caption.split_whitespace();
 
-    println!("creating decoder"); 
-    let mut decoder = Decoder::new(file_in).unwrap();
-    println!("calling into_frames()"); 
+    let mut lines = Vec::new(); 
+    let mut cur_line = String::from(""); 
+    let mut cur_line_width: f32 = 0.0; 
+
+    let space_width = font.glyph(' ').scaled(font_size).h_metrics().advance_width;
+
+    for w in words {
+        let mut word_width_px = 0.0;
+        for g in font.glyphs_for(w.chars()) { 
+            let h_metrics = g.scaled(font_size).h_metrics();
+            word_width_px = word_width_px + h_metrics.advance_width; 
+        }
+
+        if !cur_line.is_empty() { 
+            cur_line_width += space_width;
+        }
+
+        cur_line_width += word_width_px; 
+
+        // TODO edge case: is the word width greater than the line width 
+        // and have we just started a new line? smash it in anyway. 
+    
+        // can the word fit on this line? 
+        if cur_line_width > max_line_px { 
+            //no, start a new line and put the word there
+
+            //...unless we just now created a new line, then put it on anyway. 
+            if cur_line.is_empty()  { 
+                cur_line.push_str(w); 
+                lines.push(cur_line);
+                cur_line = String::from(""); 
+                cur_line_width = 0.0;
+            } else { 
+                //start a new line and put the word that didn't fit on it
+                lines.push(cur_line);
+                cur_line = String::from(""); 
+                cur_line.push_str(w); 
+                cur_line_width = word_width_px; 
+            }
+        } else { 
+            if !cur_line.is_empty() { 
+                cur_line.push(' '); 
+            }
+
+            //yes, append it to the current line 
+            cur_line.push_str(w); 
+        }
+    }
+
+    if !cur_line.is_empty() { 
+        lines.push(cur_line);
+    }
+    
+    lines
+}
+
+fn render_bottom_caption_mut<'a, I>(
+    image: &'a mut I,
+    color: I::Pixel,
+    font: &'a Font<'a>,
+    caption: &'a str,
+) where
+    I: GenericImage,
+    <I::Pixel as Pixel>::Subpixel: ValueInto<f32> + Clamp<f32>, 
+{ 
+    let (im_width, im_height) = image.dimensions();
+    let max_line_px = (im_width - (CAPTION_PADDING_HORIZ * 2)) as f32; 
+    let lines = split_into_lines(caption, font, FONT_SCALE, max_line_px); 
+
+    let v_metrics = font.v_metrics(FONT_SCALE);
+
+    let line_height: u32 = (v_metrics.ascent + (v_metrics.descent * -1.0) + v_metrics.line_gap) as u32;
+    let mut line_y = im_height - CAPTION_PADDING_BOTTOM - (line_height * (lines.len() as u32));
+    for line in lines { 
+        draw_text_centered_mut(image, color, font, &line, line_y);
+        line_y += line_height;
+    }
+}
+
+fn load_binderslap_gif() -> Vec<Frame> {  
+    let file_in = File::open("binderslap_opt.gif").unwrap();
+    let decoder = Decoder::new(file_in).unwrap();
     let frames = decoder.into_frames();
-    println!("calling collect_frames"); 
-    /*let mut frames = */frames.collect_frames().expect("error decoding gif")
+    frames.collect_frames().expect("error decoding gif")
 }
 
 fn create_binderslap_gif(input_frames: Vec<Frame>, font: &Font<'static>, caption: String) -> Vec<image::gif::Frame<'static>> { 
@@ -104,18 +181,19 @@ fn create_binderslap_gif(input_frames: Vec<Frame>, font: &Font<'static>, caption
     let num_frames = input_frames.len();
     let mut cur_frame = 1;
 
+    //TODO investigate a way to stream frames to HTTP response instead
+    //of buffering entire GIF
     for f in input_frames { 
-        print!("processing frame {} of {}... ", cur_frame, num_frames);
         let delay = f.delay().to_integer();
         let mut buf = f.into_buffer(); 
         let (fw,fh) = buf.dimensions();
 
         if cur_frame > frame_start && cur_frame < frame_end { 
-            draw_text_centered_mut(
+            render_bottom_caption_mut(
                 &mut buf, 
                 Rgba([255u8, 255u8, 255u8, 255u8]), 
                 &font, 
-                &caption
+                &caption,
             );
         }
 
@@ -127,9 +205,8 @@ fn create_binderslap_gif(input_frames: Vec<Frame>, font: &Font<'static>, caption
         // 3. do all operations on indexed pixel data instead of rgb
         let mut gif_frame = image::gif::Frame::from_rgba_speed(fw as u16, fh as u16, data.as_mut_slice(), 30); 
 
-        gif_frame.delay = 6;//delay;
+        gif_frame.delay = 6;//delay; //FIXME reuse delay from original GIF
         out_frames.push(gif_frame);
-        println!("done.");
         cur_frame = cur_frame + 1;
     }
 
@@ -183,20 +260,14 @@ fn main() {
 
                 {
                     use crate::gif::SetParameter;
-                    
                     let b = &mut buf_out;
-                    // let mut encoder = Encoder::new(b); 
-                    // let mut gif_encoder = Encoder::new()
-                    // encoder.set(Repetitions)
-                    // let mut writer: std::io::Write = b.into();
                     let mut gif_encoder = Encoder::new(b, 480, 240, &[]).unwrap();
                     let mut cur_frame = 1;
 
-                    gif_encoder.set(Repeat::Infinite);
+                    gif_encoder.set(Repeat::Infinite).unwrap();
 
                     for f in out_frames { 
                         println!("encoding frame {} of {}", cur_frame, num_frames);
-                        // encoder.encode(&f).unwrap();
                         gif_encoder.write_frame(&f).unwrap();
                         cur_frame = cur_frame + 1;
                     }

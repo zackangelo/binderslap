@@ -20,6 +20,7 @@ RUN cargo build --release
 FROM rust:1.35-slim-stretch
 
 COPY binderslap.gif . 
+COPY binderslap_opt.gif .
 COPY --from=build /binderslap/target/release/binderslap .
 
 CMD ["./binderslap"]
